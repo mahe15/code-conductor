@@ -1,12 +1,16 @@
 import React, { useState } from 'react';
 import { useProjectStore } from '../../store/useProjectStore';
-import { Cpu, ShieldCheck, Lock, Plus, FileCode2, CheckCircle2 } from 'lucide-react';
+import { AdrService } from '../../services/adrService';
+import { PromptEnricherService } from '../../services/promptEnricher';
+import { Cpu, ShieldCheck, Lock, Plus, FileCode2, Copy, Check } from 'lucide-react';
 
 export const MemoryView: React.FC = () => {
   const { memoryItems, setMemoryItem } = useProjectStore();
   const [newKey, setNewKey] = useState('');
   const [newValue, setNewValue] = useState('');
   const [isAdding, setIsAdding] = useState(false);
+  const [exportedCount, setExportedCount] = useState<number | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const handleAddMemory = (e: React.FormEvent) => {
     e.preventDefault();
@@ -15,6 +19,19 @@ export const MemoryView: React.FC = () => {
     setNewKey('');
     setNewValue('');
     setIsAdding(false);
+  };
+
+  const handleExportAdrs = () => {
+    const adrs = AdrService.exportAllAdrs(memoryItems);
+    setExportedCount(adrs.length);
+    setTimeout(() => setExportedCount(null), 3000);
+  };
+
+  const handleCopyPrompt = () => {
+    const promptContext = PromptEnricherService.enrichPrompt('<Developer Prompt>', memoryItems);
+    navigator.clipboard.writeText(promptContext);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   return (
@@ -32,6 +49,21 @@ export const MemoryView: React.FC = () => {
         </div>
 
         <div className="flex space-x-3">
+          <button
+            onClick={handleCopyPrompt}
+            className="flex items-center space-x-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition"
+            title="Copy System Prompt Context"
+          >
+            {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+            <span>{copied ? 'Copied Context' : 'Copy AI Prompt'}</span>
+          </button>
+          <button
+            onClick={handleExportAdrs}
+            className="flex items-center space-x-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition"
+          >
+            <FileCode2 className="w-4 h-4 text-indigo-400" />
+            <span>{exportedCount !== null ? `Exported ${exportedCount} ADRs!` : 'Export ADRs'}</span>
+          </button>
           <button
             onClick={() => setIsAdding(!isAdding)}
             className="flex items-center space-x-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-lg transition"
@@ -102,7 +134,7 @@ export const MemoryView: React.FC = () => {
             <div className="flex items-center justify-between text-[11px] text-slate-500 pt-2 border-t border-slate-800/60">
               <span>Confidence Score: 100%</span>
               <span className="flex items-center space-x-1 text-slate-400">
-                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                <ShieldCheck className="w-3 h-3 text-emerald-400" />
                 <span>Verified Choice</span>
               </span>
             </div>

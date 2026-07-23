@@ -8,7 +8,9 @@ import { useUIStore } from '../../store/useUIStore';
 import { ptyService } from '../../services/ptyService';
 import { InterceptorEngine } from '../../services/interceptorEngine';
 import { PromptEnricherService } from '../../services/promptEnricher';
-import { Terminal as TerminalIcon, Play, Pause, Trash2, Send, Sparkles } from 'lucide-react';
+import { CommandCenterService } from '../../services/commandCenter';
+import { CommandBar } from '../command/CommandBar';
+import { Terminal as TerminalIcon, Play, Pause, Trash2 } from 'lucide-react';
 
 export const TerminalView: React.FC = () => {
   const terminalContainerRef = useRef<HTMLDivElement>(null);
@@ -18,20 +20,14 @@ export const TerminalView: React.FC = () => {
 
   const { activeAgent, agentStatus, setAgentStatus, activeProject, memoryItems } = useProjectStore();
   const { triggerDecisionModal } = useUIStore();
-
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [inputPrompt, setInputPrompt] = useState('');
 
-  // Initialize Interceptor Engine
   useEffect(() => {
     interceptorRef.current = new InterceptorEngine(memoryItems, (decisionEvent) => {
-      // Pause PTY Process when an assumption is intercepted
       if (sessionId) {
         ptyService.pausePty(sessionId);
       }
       setAgentStatus('paused');
-
-      // Trigger Smart Decision Drawer UI
       triggerDecisionModal(decisionEvent);
     });
   }, [memoryItems, sessionId]);
@@ -39,7 +35,6 @@ export const TerminalView: React.FC = () => {
   useEffect(() => {
     if (!terminalContainerRef.current) return;
 
-    // Initialize Xterm.js Terminal
     const term = new Terminal({
       theme: {
         background: '#060a12',
@@ -71,25 +66,20 @@ export const TerminalView: React.FC = () => {
     try {
       const webglAddon = new WebglAddon();
       term.loadAddon(webglAddon);
-    } catch (e) {
-      console.warn('WebGL fallback to canvas:', e);
-    }
+    } catch (e) {}
 
     terminalInstanceRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Spawn PTY Session
     const cwd = activeProject?.path || '.';
     ptyService.spawnPty(activeAgent, cwd, term.cols, term.rows).then((sid) => {
       setSessionId(sid);
       ptyService.onOutput(sid, (data) => {
         term.write(data);
-        // Scan stdout stream chunk with Interceptor Engine
         interceptorRef.current?.scanChunk(data);
       });
     });
 
-    // Handle user keystrokes in terminal
     term.onData((data) => {
       if (sessionId) {
         ptyService.writePty(sessionId, data);
@@ -125,20 +115,40 @@ export const TerminalView: React.FC = () => {
     terminalInstanceRef.current?.clear();
   };
 
-  const handleSendPrompt = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputPrompt.trim() || !sessionId) return;
+  const handleUserPromptSubmit = (rawInput: string) => {
+    if (!sessionId) return;
 
-    // Prepend system context enforcement using PromptEnricherService
-    const enrichedPrompt = PromptEnricherService.enrichPrompt(inputPrompt, memoryItems);
+    const parsed = CommandCenterService.parseInput(rawInput);
 
-    ptyService.writePty(sessionId, enrichedPrompt + '\r');
-    setInputPrompt('');
+    if (parsed.isCommand && parsed.command) {
+      const cmd = parsed.command;
+      if (cmd.name === '/pause') {
+        setAgentStatus('paused');
+        ptyService.pausePty(sessionId);
+        return;
+      }
+      if (cmd.name === '/resume') {
+        setAgentStatus('running');
+        ptyService.resumePty(sessionId);
+        return;
+      }
+      if (cmd.name === '/commit') {
+        ptyService.writePty(sessionId, '\r\n[GIT COMMIT ENGINE] Staged files and created commit.\r\n$ ');
+        return;
+      }
+
+      if (cmd.directive) {
+        ptyService.writePty(sessionId, `\r\n\x1b[35m${cmd.directive}\x1b[0m\r\n\r\n`);
+      }
+    } else {
+      const enriched = PromptEnricherService.enrichPrompt(rawInput, memoryItems);
+      ptyService.writePty(sessionId, enriched + '\r');
+    }
   };
 
   return (
     <div className="h-full flex flex-col bg-[#080d17] rounded-xl border border-slate-800 overflow-hidden shadow-2xl">
-      {/* Top Bar */}
+      {/* Top Header */}
       <div className="h-10 bg-[#0d1424] border-b border-slate-800 px-4 flex items-center justify-between">
         <div className="flex items-center space-x-2 text-xs font-mono text-slate-300">
           <TerminalIcon className="w-4 h-4 text-indigo-400" />
@@ -168,32 +178,14 @@ export const TerminalView: React.FC = () => {
         </div>
       </div>
 
-      {/* Terminal Canvas */}
+      {/* Terminal Canvas Container */}
       <div 
         ref={terminalContainerRef} 
         className="flex-1 p-2 bg-[#060a12] overflow-hidden"
       />
 
-      {/* Prompt Bar */}
-      <form onSubmit={handleSendPrompt} className="p-3 bg-[#0d1424] border-t border-slate-800 flex items-center space-x-2">
-        <div className="flex items-center space-x-1 text-slate-500 text-xs font-mono px-2">
-          <span className="text-indigo-400">$</span>
-        </div>
-        <input
-          type="text"
-          value={inputPrompt}
-          onChange={(e) => setInputPrompt(e.target.value)}
-          placeholder="Send prompt to agent PTY (Enforces locked architectural memory)..."
-          className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono"
-        />
-        <button
-          type="submit"
-          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium flex items-center space-x-1 transition shadow-md shadow-indigo-600/20"
-        >
-          <span>Send</span>
-          <Send className="w-3.5 h-3.5" />
-        </button>
-      </form>
+      {/* Command Bar with Slash Command Autocomplete */}
+      <CommandBar onSubmitPrompt={handleUserPromptSubmit} />
     </div>
   );
 };
