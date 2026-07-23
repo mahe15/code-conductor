@@ -20,6 +20,7 @@ src-tauri/target/
 .env.test.local
 .env.production.local
 *.env
+.orchestrator/config.json
 
 # IDE / Editor files
 .vscode/*

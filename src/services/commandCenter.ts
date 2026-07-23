@@ -7,6 +7,16 @@ export interface SlashCommand {
 
 export const SUPPORTED_SLASH_COMMANDS: SlashCommand[] = [
   {
+    name: '/addkey',
+    description: 'Set your Google Gemini API Key (/addkey AIzaSy...)',
+    isAction: true,
+  },
+  {
+    name: '/apikey',
+    description: 'Alias for /addkey - Set Google Gemini API Key',
+    isAction: true,
+  },
+  {
     name: '/production',
     description: 'Enforce enterprise production readiness (strict TS types, error logging, rate limiting)',
     directive: '[DIRECTIVE: PRODUCTION-READY MODE]\nBuild with strict TypeScript types, input validation, structured error handling, rate limiting, and comprehensive log instrumentation. Do not use mock data.',

@@ -4,6 +4,7 @@ import { useUIStore } from '../../store/useUIStore';
 import { ptyService } from '../../services/ptyService';
 import { PromptEnricherService } from '../../services/promptEnricher';
 import { InterceptorEngine } from '../../services/interceptorEngine';
+import { GeminiService } from '../../services/geminiService';
 import { CommandBar } from '../command/CommandBar';
 import { CostWarningWidget } from '../cost/CostWarningWidget';
 import { CostEstimatorService, CostWarning } from '../../services/costEstimator';
@@ -14,14 +15,10 @@ import {
   User, 
   Sparkles, 
   Terminal, 
-  Code2, 
+  Key, 
   CheckCircle2, 
   ShieldCheck, 
-  Zap, 
-  Cpu, 
-  Play, 
-  Pause, 
-  RotateCcw 
+  Zap 
 } from 'lucide-react';
 
 interface ChatMessage {
@@ -29,8 +26,6 @@ interface ChatMessage {
   sender: 'user' | 'orchestrator' | 'agent';
   text: string;
   timestamp: string;
-  codeBlock?: string;
-  isDecision?: boolean;
 }
 
 export const AgentChatView: React.FC = () => {
@@ -40,6 +35,8 @@ export const AgentChatView: React.FC = () => {
 
   const [viewMode, setViewMode] = useState<'chat' | 'terminal'>('chat');
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [geminiKeyInput, setGeminiKeyInput] = useState<string>(GeminiService.getApiKey());
+  const [showKeyModal, setShowKeyModal] = useState<boolean>(false);
   const [activeDangerAlert, setActiveDangerAlert] = useState<RiskAlert | null>(null);
   const [activeCostWarning, setActiveCostWarning] = useState<CostWarning>({
     hasWarning: false,
@@ -54,13 +51,13 @@ export const AgentChatView: React.FC = () => {
     {
       id: 'msg-1',
       sender: 'orchestrator',
-      text: `Hello! I am your AI Coding Orchestrator. I coordinate **${activeAgent}** for project **${activeProject?.name || 'Code Conductor'}**.`,
+      text: `Hello! I am your AI Coding Orchestrator powered by **Gemini 2.5 Flash API** and **${activeAgent}**.`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     },
     {
       id: 'msg-2',
       sender: 'orchestrator',
-      text: `All architectural decisions (React 19, TypeScript, Tailwind CSS v4, SQLite) are locked into memory. I will prevent the AI from guessing or making unverified assumptions.`,
+      text: `All architectural decisions (React 19, TypeScript, Tailwind CSS v4, SQLite) are locked into project memory. Type **/addkey <key>** or click the key button to configure your Gemini API key.`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
@@ -85,10 +82,28 @@ export const AgentChatView: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSendMessage = (rawInput: string) => {
+  const handleSendMessage = async (rawInput: string) => {
     if (!sessionId) return;
 
     const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    // Handle /addkey or /apikey slash command
+    if (rawInput.startsWith('/addkey') || rawInput.startsWith('/apikey')) {
+      const parts = rawInput.split(' ');
+      const keyArg = parts.slice(1).join(' ').trim();
+      if (keyArg) {
+        GeminiService.setApiKey(keyArg);
+        setGeminiKeyInput(keyArg);
+        setMessages((prev) => [
+          ...prev,
+          { id: `usr-${Date.now()}`, sender: 'user', text: rawInput, timestamp: timeStr },
+          { id: `sys-${Date.now()}`, sender: 'orchestrator', text: `✔ Gemini API Key saved successfully!`, timestamp: timeStr },
+        ]);
+      } else {
+        setShowKeyModal(true);
+      }
+      return;
+    }
 
     // 1. Add User Message
     const userMsg: ChatMessage = {
@@ -112,31 +127,29 @@ export const AgentChatView: React.FC = () => {
     const costCheck = CostEstimatorService.evaluateArchitectureCost(rawInput);
     if (costCheck.hasWarning) {
       setActiveCostWarning(costCheck);
-    } else {
-      setActiveCostWarning({ hasWarning: false, proposedTech: '', estimatedMonthlyCost: '', recommendedAlternative: '', recommendedCost: '', savingsMessage: '' });
     }
 
-    // 4. Send to PTY
+    // 4. Send to PTY & Query Gemini API
     setAgentStatus('running');
     const enriched = PromptEnricherService.enrichPrompt(rawInput, memoryItems);
     ptyService.writePty(sessionId, enriched + '\r');
 
-    // 5. Simulate Orchestrator AI Response
-    setTimeout(() => {
-      const agentMsg: ChatMessage = {
-        id: `agent-${Date.now()}`,
-        sender: 'orchestrator',
-        text: `Executing task with **${activeAgent}**. Enforcing locked project decisions: **React + TypeScript + Tailwind v4 + SQLite**.`,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        codeBlock: `// Enforced Architecture Context\nconst config = {\n  framework: "React 19",\n  styling: "Tailwind CSS v4",\n  database: "SQLite",\n  orchestration: "Antigravity PTY"\n};`,
-      };
-      setMessages((prev) => [...prev, agentMsg]);
-      setAgentStatus('idle');
-    }, 800);
+    // Query Gemini 2.5 Flash API
+    const responseText = await GeminiService.generateContent(rawInput, memoryItems);
+
+    const agentMsg: ChatMessage = {
+      id: `agent-${Date.now()}`,
+      sender: 'orchestrator',
+      text: responseText,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+    setMessages((prev) => [...prev, agentMsg]);
+    setAgentStatus('idle');
   };
 
-  const handleQuickPrompt = (prompt: string) => {
-    handleSendMessage(prompt);
+  const handleSaveApiKey = () => {
+    GeminiService.setApiKey(geminiKeyInput.trim());
+    setShowKeyModal(false);
   };
 
   return (
@@ -149,17 +162,25 @@ export const AgentChatView: React.FC = () => {
           </div>
           <div>
             <div className="flex items-center space-x-2">
-              <h2 className="font-bold text-sm text-slate-100">{activeAgent}</h2>
+              <h2 className="font-bold text-sm text-slate-100">Gemini 2.5 Flash Orchestrator</h2>
               <span className="text-[10px] bg-indigo-950 text-indigo-300 font-mono px-2 py-0.5 rounded-full border border-indigo-500/30">
-                Orchestrated Mode
+                Gemini API Enabled
               </span>
             </div>
             <p className="text-[11px] text-slate-400">Guarding architecture & preventing wrong assumptions</p>
           </div>
         </div>
 
-        {/* View Mode Switcher (Studio vs PTY Console) */}
+        {/* View Mode Switcher & API Key Button */}
         <div className="flex items-center space-x-3">
+          <button
+            onClick={() => setShowKeyModal(true)}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs text-indigo-300 transition"
+          >
+            <Key className="w-3.5 h-3.5 text-indigo-400" />
+            <span>{GeminiService.getApiKey() ? 'API Key Configured' : 'Set Gemini API Key'}</span>
+          </button>
+
           <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
             <button
               onClick={() => setViewMode('chat')}
@@ -187,6 +208,42 @@ export const AgentChatView: React.FC = () => {
         </div>
       </div>
 
+      {/* API Key Modal */}
+      {showKeyModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-[#0f172a] border border-indigo-500/40 rounded-2xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-center space-x-2 text-indigo-400 font-bold text-sm">
+              <Key className="w-5 h-5" />
+              <span>Set Gemini API Key</span>
+            </div>
+            <p className="text-xs text-slate-300">
+              Enter your Google Gemini API Key or type <strong className="text-indigo-400">/addkey &lt;key&gt;</strong> in prompt bar.
+            </p>
+            <input
+              type="password"
+              value={geminiKeyInput}
+              onChange={(e) => setGeminiKeyInput(e.target.value)}
+              placeholder="AIzaSy..."
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
+            />
+            <div className="flex justify-end space-x-2">
+              <button
+                onClick={() => setShowKeyModal(false)}
+                className="px-3 py-1.5 bg-slate-800 text-slate-300 rounded-lg text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveApiKey}
+                className="px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-semibold"
+              >
+                Save Key
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Cost Advisory Alert */}
       {activeCostWarning.hasWarning && (
         <div className="p-3 bg-amber-950/60 border-b border-amber-500/40">
@@ -211,7 +268,6 @@ export const AgentChatView: React.FC = () => {
                 msg.sender === 'user' ? 'flex-row-reverse space-x-reverse' : ''
               }`}
             >
-              {/* Avatar */}
               <div
                 className={`w-9 h-9 rounded-2xl flex items-center justify-center shrink-0 shadow-lg ${
                   msg.sender === 'user'
@@ -222,7 +278,6 @@ export const AgentChatView: React.FC = () => {
                 {msg.sender === 'user' ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
               </div>
 
-              {/* Message Bubble Card */}
               <div
                 className={`max-w-2xl rounded-2xl p-4 space-y-2 text-xs leading-relaxed border ${
                   msg.sender === 'user'
@@ -232,26 +287,18 @@ export const AgentChatView: React.FC = () => {
               >
                 <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono pb-1 border-b border-slate-800/60">
                   <span className="font-semibold text-slate-300">
-                    {msg.sender === 'user' ? 'Developer' : 'AI Orchestrator'}
+                    {msg.sender === 'user' ? 'Developer' : 'Gemini 2.5 Flash Orchestrator'}
                   </span>
                   <span>{msg.timestamp}</span>
                 </div>
 
                 <div className="whitespace-pre-wrap font-sans text-sm">{msg.text}</div>
-
-                {/* Code Block if present */}
-                {msg.codeBlock && (
-                  <div className="mt-2 rounded-xl bg-slate-950 p-3 border border-slate-800 font-mono text-xs text-indigo-300 overflow-x-auto">
-                    <pre>{msg.codeBlock}</pre>
-                  </div>
-                )}
               </div>
             </div>
           ))}
           <div ref={messagesEndRef} />
         </div>
       ) : (
-        /* Raw Terminal Logs Mode */
         <div className="flex-1 p-4 bg-[#060a12] font-mono text-xs text-slate-200 overflow-y-auto space-y-1">
           {rawLogs.map((log, idx) => (
             <div key={idx} className="whitespace-pre-wrap leading-relaxed">
@@ -261,29 +308,9 @@ export const AgentChatView: React.FC = () => {
         </div>
       )}
 
-      {/* Quick Suggestion Chips */}
-      <div className="px-5 py-2 bg-[#0a0f1a] border-t border-slate-800/60 flex items-center space-x-2 overflow-x-auto">
-        <span className="text-[10px] uppercase font-bold text-slate-500 shrink-0">Quick Directives:</span>
-        {[
-          'Build User Authentication',
-          'Setup PostgreSQL Database',
-          'Add Tailwind v4 Component',
-          'Export ADR Records',
-          'Run Security Audit',
-        ].map((chip) => (
-          <button
-            key={chip}
-            onClick={() => handleQuickPrompt(chip)}
-            className="px-3 py-1 bg-slate-900 hover:bg-indigo-600/30 border border-slate-800 hover:border-indigo-500/40 text-slate-300 text-xs rounded-full shrink-0 transition"
-          >
-            {chip}
-          </button>
-        ))}
-      </div>
-
       {/* Command Input Bar */}
       <div className="shrink-0">
-        <CommandBar onSubmitPrompt={handleSendMessage} placeholder="Describe feature or slash command (/production, /simple, /commit)..." />
+        <CommandBar onSubmitPrompt={handleSendMessage} placeholder="Enter prompt or /addkey <key> to save Gemini API key..." />
       </div>
 
       {/* Danger Modal */}

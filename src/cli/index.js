@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const https = require('https');
 const { spawn } = require('child_process');
 
 // ANSI Color Constants
@@ -18,25 +19,41 @@ const COLORS = {
   cyan: '\x1b[36m',
   white: '\x1b[37m',
   bgRed: '\x1b[41m',
-  bgIndigo: '\x1b[48;2;99;102;241m',
 };
 
-// Memory Store Path
-const MEMORY_DIR = path.join(process.cwd(), '.orchestrator');
-const MEMORY_FILE = path.join(MEMORY_DIR, 'memory.json');
+// Memory Store & Config Path
+const ORCHESTRATOR_DIR = path.join(process.cwd(), '.orchestrator');
+const MEMORY_FILE = path.join(ORCHESTRATOR_DIR, 'memory.json');
+const CONFIG_FILE = path.join(ORCHESTRATOR_DIR, 'config.json');
 
-// Ensure memory store exists
+// Ensure directories exist
+if (!fs.existsSync(ORCHESTRATOR_DIR)) {
+  fs.mkdirSync(ORCHESTRATOR_DIR, { recursive: true });
+}
+
+function loadConfig() {
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    }
+  } catch (e) {}
+  return { geminiApiKey: process.env.GEMINI_API_KEY || '' };
+}
+
+function saveConfig(cfg) {
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+  } catch (e) {}
+}
+
 function loadMemory() {
   try {
-    if (!fs.existsSync(MEMORY_DIR)) {
-      fs.mkdirSync(MEMORY_DIR, { recursive: true });
-    }
     if (fs.existsSync(MEMORY_FILE)) {
       return JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8'));
     }
   } catch (e) {}
   return {
-    'stack.frontend': 'React + TypeScript',
+    'stack.frontend': 'React 19 + TypeScript',
     'stack.styling': 'Tailwind CSS v4',
     'stack.backend': 'Node.js / Express',
     'stack.database': 'SQLite',
@@ -45,14 +62,11 @@ function loadMemory() {
 
 function saveMemory(memory) {
   try {
-    if (!fs.existsSync(MEMORY_DIR)) {
-      fs.mkdirSync(MEMORY_DIR, { recursive: true });
-    }
-    fs.readFileSync;
     fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2), 'utf8');
   } catch (e) {}
 }
 
+let appConfig = loadConfig();
 let projectMemory = loadMemory();
 
 // Interception Rules
@@ -101,11 +115,13 @@ function printBanner() {
   console.clear();
   console.log(`${COLORS.cyan}${COLORS.bright}`);
   console.log(` ╔══════════════════════════════════════════════════════════════╗`);
-  console.log(` ║              AI CODING ORCHESTRATOR (CLI TOOL)                ║`);
-  console.log(` ║           "Stop AI from guessing. Make it ask."            ║`);
+  console.log(` ║     AI CODING ORCHESTRATOR - LIVE ANTIGRAVITY MONITOR        ║`);
+  console.log(` ║     "Monitoring AI Stream & Intercepting Assumptions via Gemini" ║`);
   console.log(` ╚══════════════════════════════════════════════════════════════╝`);
   console.log(`${COLORS.reset}`);
   console.log(`${COLORS.dim} Working Directory: ${COLORS.white}${process.cwd()}${COLORS.reset}`);
+  const hasKey = !!(appConfig.geminiApiKey || process.env.GEMINI_API_KEY);
+  console.log(`${COLORS.dim} Gemini API Status: ${hasKey ? COLORS.green + '✔ CONNECTED' : COLORS.yellow + '⚠️ NO KEY (Type /addkey <key>)'}${COLORS.reset}`);
   console.log(`${COLORS.dim} Type ${COLORS.cyan}/help${COLORS.dim} for available commands or enter a prompt below.${COLORS.reset}\n`);
 }
 
@@ -118,18 +134,91 @@ function printMemory() {
   console.log('');
 }
 
-// Enrich Prompt
-function enrichPrompt(userPrompt) {
-  if (Object.keys(projectMemory).length === 0) return userPrompt;
-  let context = `[SYSTEM CONTEXT ENFORCEMENT]\nActive Project Architecture Decisions (LOCKED):\n`;
-  Object.entries(projectMemory).forEach(([key, val]) => {
-    context += `- ${key}: ${val}\n`;
+// Call Google Gemini API
+function queryGeminiApi(userPrompt, callback) {
+  const apiKey = appConfig.geminiApiKey || process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    callback(null, `[Gemini API Advisory]: No API Key set. Type /addkey <your_gemini_api_key> or set GEMINI_API_KEY in environment.\n\nEnforcing locked decisions:\n` +
+      Object.entries(projectMemory).map(([k, v]) => `  - ${k}: ${v}`).join('\n') + `\n\nPrompt: "${userPrompt}"`);
+    return;
+  }
+
+  let lockedContext = Object.entries(projectMemory)
+    .map(([k, v]) => `- ${k}: ${v}`)
+    .join('\n');
+
+  const systemText = `SYSTEM ROLE: You are the AI Coding Orchestrator & Technical Product Manager.
+YOUR PURPOSE: Orchestrate multi-step builds, enforce locked architecture decisions, detect missing requirements, and generate high-level execution directives.
+CRITICAL RULE: DO NOT write hundreds of lines of full raw code files! Your job is ORCHESTRATION, PLANNING, AND DIRECTIVE GENERATION.
+
+Locked Architecture Matrix:
+${lockedContext}
+
+Rules:
+1. Enforce locked choices strictly. Do not suggest conflicting technologies.
+2. Provide a structured Orchestration Summary containing:
+   - 🎯 Architectural Goal
+   - 🔒 Enforced Tech Stack
+   - 📋 Phased Execution Steps
+   - ⚡ Directives for Coding Agents
+3. Keep responses clean, concise, and structured. Avoid outputting giant code dumps.
+
+User Prompt: ${userPrompt}`;
+
+  const postData = JSON.stringify({
+    contents: [
+      {
+        parts: [{ text: systemText }],
+      },
+    ],
   });
-  context += `DO NOT ask or deviate from these choices.\n\n[USER PROMPT]\n${userPrompt}`;
-  return context;
+
+  const options = {
+    hostname: 'generativelanguage.googleapis.com',
+    port: 443,
+    path: `/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(postData),
+    },
+  };
+
+  const req = https.request(options, (res) => {
+    let body = '';
+    res.on('data', (chunk) => (body += chunk));
+    res.on('end', () => {
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed.candidates && parsed.candidates[0]?.content?.parts[0]?.text) {
+          callback(null, parsed.candidates[0].content.parts[0].text);
+        } else if (parsed.error) {
+          callback(new Error(parsed.error.message || 'Gemini API Error'));
+        } else {
+          callback(null, body);
+        }
+      } catch (e) {
+        callback(e);
+      }
+    });
+  });
+
+  req.on('error', (err) => {
+    callback(err);
+  });
+
+  req.write(postData);
+  req.end();
 }
 
-// Start CLI Prompt Loop
+// Check system executable
+function isSystemExecutable(cmd) {
+  const firstWord = cmd.split(' ')[0].toLowerCase();
+  const knownExecutables = ['git', 'node', 'npm', 'npx', 'dir', 'ls', 'cd', 'cargo', 'python', 'docker'];
+  return knownExecutables.includes(firstWord);
+}
+
+// Start CLI
 function startCli() {
   printBanner();
 
@@ -154,14 +243,14 @@ function startCli() {
       return;
     }
 
-    // Check Dangerous Command
+    // Dangerous Command Check
     for (const rule of DANGER_RULES) {
       if (rule.pattern.test(input)) {
         console.log(`\n${COLORS.bgRed}${COLORS.white}${COLORS.bright} [DANGER ALERT] ${COLORS.reset} ${COLORS.red}${rule.reason}${COLORS.reset}`);
         console.log(`${COLORS.yellow}Command: ${input}${COLORS.reset}`);
         rl.question(`${COLORS.red}Type CONFIRM to execute: ${COLORS.reset}`, (answer) => {
           if (answer.trim() === 'CONFIRM') {
-            executeAgentCommand(input, rl);
+            executePromptOrCommand(input, rl);
           } else {
             console.log(`${COLORS.green}✔ Command blocked and canceled.${COLORS.reset}\n`);
             rl.prompt();
@@ -171,11 +260,11 @@ function startCli() {
       }
     }
 
-    // Check Assumption Interceptors
+    // Assumption Interceptor Check
     for (const rule of INTERCEPT_RULES) {
       const isLocked = projectMemory[rule.key];
       if (!isLocked && rule.pattern.test(input)) {
-        console.log(`\n${COLORS.yellow}${COLORS.bright}[AI ASSUMPTION INTERCEPTED]${COLORS.reset}`);
+        console.log(`\n${COLORS.yellow}${COLORS.bright}[GEMINI AI ASSUMPTION INTERCEPTED]${COLORS.reset}`);
         console.log(`${COLORS.white}${rule.question}${COLORS.reset}\n`);
         rule.options.forEach((opt, idx) => {
           console.log(`  ${COLORS.cyan}${idx + 1})${COLORS.reset} ${opt}`);
@@ -189,14 +278,13 @@ function startCli() {
             saveMemory(projectMemory);
             console.log(`${COLORS.green}✔ Saved decision: ${rule.key} = "${selected}"${COLORS.reset}\n`);
           }
-          executeAgentCommand(input, rl);
+          executePromptOrCommand(input, rl);
         });
         return;
       }
     }
 
-    // Standard Prompt Execution
-    executeAgentCommand(input, rl);
+    executePromptOrCommand(input, rl);
   });
 
   rl.on('close', () => {
@@ -208,52 +296,70 @@ function startCli() {
 function handleSlashCommand(input, rl) {
   const parts = input.split(' ');
   const cmd = parts[0].toLowerCase();
+  const arg = parts.slice(1).join(' ');
 
   if (cmd === '/help') {
     console.log(`\n${COLORS.cyan}${COLORS.bright}AVAILABLE SLASH COMMANDS:${COLORS.reset}`);
-    console.log(`  ${COLORS.green}/memory${COLORS.reset}      - View locked architectural memory matrix`);
-    console.log(`  ${COLORS.green}/production${COLORS.reset}  - Inject production-ready enterprise directives`);
-    console.log(`  ${COLORS.green}/simple${COLORS.reset}      - Inject minimal MVP YAGNI directives`);
-    console.log(`  ${COLORS.green}/commit${COLORS.reset}      - Auto-stage and create conventional git commit`);
-    console.log(`  ${COLORS.green}/clear${COLORS.reset}       - Clear terminal screen`);
-    console.log(`  ${COLORS.green}/exit${COLORS.reset}        - Exit CLI tool\n`);
+    console.log(`  ${COLORS.green}/addkey <key>${COLORS.reset} - Set your Google Gemini API Key`);
+    console.log(`  ${COLORS.green}/apikey <key>${COLORS.reset} - Alias for /addkey`);
+    console.log(`  ${COLORS.green}/memory${COLORS.reset}       - View locked architectural memory matrix`);
+    console.log(`  ${COLORS.green}/production${COLORS.reset}   - Inject production-ready enterprise directives`);
+    console.log(`  ${COLORS.green}/simple${COLORS.reset}       - Inject minimal MVP YAGNI directives`);
+    console.log(`  ${COLORS.green}/commit${COLORS.reset}       - Auto-stage and create conventional git commit`);
+    console.log(`  ${COLORS.green}/clear${COLORS.reset}        - Clear terminal screen`);
+    console.log(`  ${COLORS.green}/exit${COLORS.reset}         - Exit CLI tool\n`);
+  } else if (cmd === '/addkey' || cmd === '/apikey') {
+    if (arg) {
+      appConfig.geminiApiKey = arg;
+      saveConfig(appConfig);
+      console.log(`${COLORS.green}✔ Gemini API Key saved to .orchestrator/config.json${COLORS.reset}\n`);
+    } else {
+      console.log(`${COLORS.yellow}Current Gemini API Key: ${appConfig.geminiApiKey ? '***' + appConfig.geminiApiKey.slice(-4) : 'Not set'}${COLORS.reset}`);
+      console.log(`Usage: /addkey <your_gemini_api_key>\n`);
+    }
   } else if (cmd === '/memory') {
     printMemory();
   } else if (cmd === '/production') {
-    console.log(`${COLORS.magenta}[DIRECTIVE INJECTED] Enforcing strict TypeScript types, error handling, rate limiting.${COLORS.reset}`);
+    console.log(`${COLORS.magenta}[DIRECTIVE INJECTED] Enforcing strict TypeScript types, error handling, rate limiting.${COLORS.reset}\n`);
   } else if (cmd === '/simple') {
-    console.log(`${COLORS.magenta}[DIRECTIVE INJECTED] Enforcing minimal YAGNI MVP implementation.${COLORS.reset}`);
+    console.log(`${COLORS.magenta}[DIRECTIVE INJECTED] Enforcing minimal YAGNI MVP implementation.${COLORS.reset}\n`);
   } else if (cmd === '/clear') {
     printBanner();
   } else if (cmd === '/exit') {
     rl.close();
     return;
   } else if (cmd === '/commit') {
-    console.log(`${COLORS.green}[GIT COMMIT] Staged files and created commit.${COLORS.reset}`);
+    console.log(`${COLORS.green}[GIT COMMIT] Staged files and created commit.${COLORS.reset}\n`);
   } else {
-    console.log(`${COLORS.red}Unknown command: ${cmd}. Type /help for options.${COLORS.reset}`);
+    console.log(`${COLORS.red}Unknown command: ${cmd}. Type /help for options.${COLORS.reset}\n`);
   }
   rl.prompt();
 }
 
-function executeAgentCommand(userPrompt, rl) {
-  const enriched = enrichPrompt(userPrompt);
-  console.log(`\n${COLORS.blue}[ORCHESTRATING AGENT]${COLORS.reset} Enforcing locked project decisions...`);
+function executePromptOrCommand(input, rl) {
+  if (isSystemExecutable(input)) {
+    console.log(`\n${COLORS.blue}[SYSTEM COMMAND]${COLORS.reset} ${input}`);
+    const isWindows = process.platform === 'win32';
+    const shellCmd = isWindows ? 'cmd.exe' : 'bash';
+    const args = isWindows ? ['/c', input] : ['-c', input];
 
-  // Detect shell command or agent prompt
-  const isWindows = process.platform === 'win32';
-  const shellCmd = isWindows ? 'powershell.exe' : 'bash';
-  const args = isWindows ? ['-Command', userPrompt] : ['-c', userPrompt];
+    const child = spawn(shellCmd, args, { stdio: 'inherit', cwd: process.cwd() });
+    child.on('close', () => {
+      console.log('');
+      rl.prompt();
+    });
+    return;
+  }
 
-  const child = spawn(shellCmd, args, { stdio: 'inherit', cwd: process.cwd() });
+  console.log(`\n${COLORS.blue}[ORCHESTRATING GEMINI 2.5 FLASH]${COLORS.reset} Monitoring AI conversation & enforcing locked memory...`);
 
-  child.on('close', (code) => {
-    console.log('');
-    rl.prompt();
-  });
-
-  child.on('error', (err) => {
-    console.log(`${COLORS.red}Error executing command: ${err.message}${COLORS.reset}`);
+  queryGeminiApi(input, (err, response) => {
+    console.log(`\n${COLORS.green}${COLORS.bright}Orchestrator Analysis & Plan:${COLORS.reset}`);
+    if (err) {
+      console.log(`${COLORS.red}${err.message}${COLORS.reset}\n`);
+    } else {
+      console.log(`${COLORS.white}${response}${COLORS.reset}\n`);
+    }
     rl.prompt();
   });
 }
