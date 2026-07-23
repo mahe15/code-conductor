@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useUIStore } from '../../store/useUIStore';
 import { useProjectStore } from '../../store/useProjectStore';
+import { ptyService } from '../../services/ptyService';
 import { Sparkles, ShieldAlert, Check, ArrowRight } from 'lucide-react';
 
 export const DecisionModal: React.FC = () => {
@@ -15,13 +16,22 @@ export const DecisionModal: React.FC = () => {
     const finalChoice = option === 'Other' ? customInput : option;
     if (!finalChoice) return;
 
-    // Save decision to Project Memory
-    setMemoryItem(`stack.${activeDecisionEvent.category.toLowerCase()}`, finalChoice);
-    
-    // Set Agent to Running state
+    // 1. Lock decision into Project Memory Store
+    const memoryKey = `stack.${activeDecisionEvent.category.toLowerCase()}`;
+    setMemoryItem(memoryKey, finalChoice);
+
+    // 2. Inject decision directive string to active PTY stdin
+    if (activeDecisionEvent.session_id) {
+      const directive = `\r\n[DEVELOPER DECISION]: Use "${finalChoice}" for ${activeDecisionEvent.category}. Proceed with implementation.\r\n`;
+      ptyService.writePty(activeDecisionEvent.session_id, directive);
+      // Resume PTY Execution (SIGCONT)
+      ptyService.resumePty(activeDecisionEvent.session_id);
+    }
+
+    // 3. Set Agent Status to Running
     setAgentStatus('running');
 
-    // Close Modal
+    // 4. Close Modal
     setDecisionModalOpen(false);
   };
 
