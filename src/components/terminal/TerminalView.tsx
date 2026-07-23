@@ -1,74 +1,141 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
+import '@xterm/xterm/css/xterm.css';
 import { useProjectStore } from '../../store/useProjectStore';
-import { Terminal as TerminalIcon, Send, Play, Pause, Trash2, ShieldCheck, Zap } from 'lucide-react';
+import { ptyService } from '../../services/ptyService';
+import { Terminal as TerminalIcon, Play, Pause, Trash2, Send, Cpu } from 'lucide-react';
 
 export const TerminalView: React.FC = () => {
-  const terminalRef = useRef<HTMLDivElement>(null);
+  const terminalContainerRef = useRef<HTMLDivElement>(null);
+  const terminalInstanceRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
   const { activeAgent, agentStatus, setAgentStatus, activeProject } = useProjectStore();
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [inputPrompt, setInputPrompt] = useState('');
-  const [logs, setLogs] = useState<string[]>([
-    '\x1b[38;2;99;102;241m[AI Orchestrator v0.1.0 Initialized]\x1b[0m',
-    `Connected to project: \x1b[32m${activeProject?.name}\x1b[0m (${activeProject?.path})`,
-    `Active Agent PTY Adapter: \x1b[36m${activeAgent}\x1b[0m`,
-    'Ready for developer prompt or slash commands (/production, /simple, /commit, /pause)...',
-    '--------------------------------------------------------------------------------',
-  ]);
 
-  const handleSendMessage = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputPrompt.trim()) return;
+  useEffect(() => {
+    if (!terminalContainerRef.current) return;
 
-    const userLine = `\x1b[38;2;59;130;246m[User Input]\x1b[0m > ${inputPrompt}`;
-    setLogs((prev) => [...prev, userLine]);
+    // Initialize Xterm.js Terminal
+    const term = new Terminal({
+      theme: {
+        background: '#060a12',
+        foreground: '#f8fafc',
+        cursor: '#6366f1',
+        selectionBackground: '#334155',
+        black: '#090d16',
+        red: '#f43f5e',
+        green: '#10b981',
+        yellow: '#f59e0b',
+        blue: '#3b82f6',
+        magenta: '#a855f7',
+        cyan: '#06b6d4',
+        white: '#f8fafc',
+      },
+      fontFamily: "'Fira Code', 'JetBrains Mono', monospace",
+      fontSize: 13,
+      lineHeight: 1.3,
+      cursorBlink: true,
+      convertEol: true,
+    });
 
-    // Handle Slash Commands
-    if (inputPrompt.startsWith('/')) {
-      const command = inputPrompt.split(' ')[0].toLowerCase();
-      if (command === '/pause') {
-        setAgentStatus('paused');
-        setLogs((prev) => [...prev, '\x1b[33m[ORCHESTRATOR SIGNAL]\x1b[0m Sent SIGSTOP to CLI agent process. Execution PAUSED.']);
-      } else if (command === '/resume') {
-        setAgentStatus('running');
-        setLogs((prev) => [...prev, '\x1b[32m[ORCHESTRATOR SIGNAL]\x1b[0m Sent SIGCONT to CLI agent process. Execution RESUMED.']);
-      } else if (command === '/production') {
-        setLogs((prev) => [...prev, '\x1b[35m[DIRECTIVE INJECTED]\x1b[0m Applied Production-Ready Directive (Strict TypeScript, error handling, rate limiting).']);
-      } else if (command === '/simple') {
-        setLogs((prev) => [...prev, '\x1b[35m[DIRECTIVE INJECTED]\x1b[0m Applied Minimal MVP Directive (YAGNI, minimal code, zero over-engineering).']);
-      } else if (command === '/commit') {
-        setLogs((prev) => [...prev, '\x1b[32m[GIT AGENT]\x1b[0m Staged changed files and created conventional commit.']);
-      }
-    } else {
-      // Simulate Agent Output
-      setAgentStatus('running');
-      setTimeout(() => {
-        setLogs((prev) => [
-          ...prev,
-          `\x1b[38;2;168;85;247m[${activeAgent}]\x1b[0m Analyzing request using project architecture context...`,
-          `Enforcing architectural memory: \x1b[32mReact + TypeScript + Tailwind v4 + SQLite\x1b[0m`,
-          `Executing command...`,
-        ]);
-      }, 500);
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+
+    term.open(terminalContainerRef.current);
+    fitAddon.fit();
+
+    // Try WebGL Addon for accelerated rendering
+    try {
+      const webglAddon = new WebglAddon();
+      term.loadAddon(webglAddon);
+    } catch (e) {
+      console.warn('WebGL addon fallback to canvas:', e);
     }
 
-    setInputPrompt('');
+    terminalInstanceRef.current = term;
+    fitAddonRef.current = fitAddon;
+
+    // Spawn PTY Session
+    const cwd = activeProject?.path || '.';
+    ptyService.spawnPty(activeAgent, cwd, term.cols, term.rows).then((sid) => {
+      setSessionId(sid);
+      ptyService.onOutput(sid, (data) => {
+        term.write(data);
+      });
+    });
+
+    // Handle user keystrokes in terminal canvas
+    term.onData((data) => {
+      if (sessionId) {
+        ptyService.writePty(sessionId, data);
+      }
+    });
+
+    // Handle Resize
+    const handleResize = () => {
+      if (fitAddonRef.current && terminalInstanceRef.current && sessionId) {
+        fitAddonRef.current.fit();
+        ptyService.resizePty(sessionId, term.cols, term.rows);
+      }
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      term.dispose();
+    };
+  }, [activeAgent]);
+
+  const handlePauseToggle = () => {
+    if (!sessionId) return;
+    if (agentStatus === 'running') {
+      setAgentStatus('paused');
+      ptyService.pausePty(sessionId);
+    } else {
+      setAgentStatus('running');
+      ptyService.resumePty(sessionId);
+    }
   };
 
-  const clearTerminal = () => {
-    setLogs(['Terminal output cleared.']);
+  const handleClear = () => {
+    terminalInstanceRef.current?.clear();
+  };
+
+  const handleSendPrompt = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputPrompt.trim() || !sessionId) return;
+
+    ptyService.writePty(sessionId, inputPrompt + '\r');
+    setInputPrompt('');
   };
 
   return (
     <div className="h-full flex flex-col bg-[#080d17] rounded-xl border border-slate-800 overflow-hidden shadow-2xl">
-      {/* Terminal Top Bar */}
+      {/* Top Header */}
       <div className="h-10 bg-[#0d1424] border-b border-slate-800 px-4 flex items-center justify-between">
-        <div className="flex items-center space-x-2 text-xs font-mono text-slate-400">
+        <div className="flex items-center space-x-2 text-xs font-mono text-slate-300">
           <TerminalIcon className="w-4 h-4 text-indigo-400" />
-          <span>PTY Stream Canvas ({activeAgent})</span>
+          <span>Interactive PTY Stream ({activeAgent})</span>
+          {sessionId && <span className="text-[10px] text-slate-500 font-mono">[{sessionId}]</span>}
         </div>
 
         <div className="flex items-center space-x-2">
           <button
-            onClick={clearTerminal}
+            onClick={handlePauseToggle}
+            className={`px-2 py-1 rounded text-xs flex items-center space-x-1 border transition ${
+              agentStatus === 'running'
+                ? 'bg-amber-950/60 border-amber-500/30 text-amber-300 hover:bg-amber-900/80'
+                : 'bg-emerald-950/60 border-emerald-500/30 text-emerald-300 hover:bg-emerald-900/80'
+            }`}
+          >
+            {agentStatus === 'running' ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+            <span>{agentStatus === 'running' ? 'Pause Process' : 'Resume Process'}</span>
+          </button>
+          <button
+            onClick={handleClear}
             className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded"
             title="Clear Console"
           >
@@ -77,20 +144,14 @@ export const TerminalView: React.FC = () => {
         </div>
       </div>
 
-      {/* Terminal Output Logs */}
+      {/* Xterm.js Canvas Container */}
       <div 
-        ref={terminalRef} 
-        className="flex-1 p-4 overflow-y-auto font-mono text-xs text-slate-200 space-y-1 bg-[#060a12]"
-      >
-        {logs.map((log, idx) => (
-          <div key={idx} className="leading-relaxed whitespace-pre-wrap">
-            {log}
-          </div>
-        ))}
-      </div>
+        ref={terminalContainerRef} 
+        className="flex-1 p-2 bg-[#060a12] overflow-hidden"
+      />
 
-      {/* Input Prompt Bar */}
-      <form onSubmit={handleSendMessage} className="p-3 bg-[#0d1424] border-t border-slate-800 flex items-center space-x-2">
+      {/* Prompt Bar */}
+      <form onSubmit={handleSendPrompt} className="p-3 bg-[#0d1424] border-t border-slate-800 flex items-center space-x-2">
         <div className="flex items-center space-x-1 text-slate-500 text-xs font-mono px-2">
           <span className="text-indigo-400">$</span>
         </div>
@@ -98,7 +159,7 @@ export const TerminalView: React.FC = () => {
           type="text"
           value={inputPrompt}
           onChange={(e) => setInputPrompt(e.target.value)}
-          placeholder="Enter prompt for AI agent or slash command (/production, /simple, /commit, /pause)..."
+          placeholder="Send command to agent PTY..."
           className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono"
         />
         <button
