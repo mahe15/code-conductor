@@ -9,8 +9,12 @@ import { ptyService } from '../../services/ptyService';
 import { InterceptorEngine } from '../../services/interceptorEngine';
 import { PromptEnricherService } from '../../services/promptEnricher';
 import { CommandCenterService } from '../../services/commandCenter';
+import { RiskGuardService, RiskAlert } from '../../services/riskGuard';
+import { CostEstimatorService, CostWarning } from '../../services/costEstimator';
 import { CommandBar } from '../command/CommandBar';
-import { Terminal as TerminalIcon, Play, Pause, Trash2 } from 'lucide-react';
+import { CostWarningWidget } from '../cost/CostWarningWidget';
+import { DangerModal } from '../risk/DangerModal';
+import { Terminal as TerminalIcon, Play, Pause, Trash2, Sparkles } from 'lucide-react';
 
 export const TerminalView: React.FC = () => {
   const terminalContainerRef = useRef<HTMLDivElement>(null);
@@ -18,9 +22,19 @@ export const TerminalView: React.FC = () => {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const interceptorRef = useRef<InterceptorEngine | null>(null);
 
-  const { activeAgent, agentStatus, setAgentStatus, activeProject, memoryItems } = useProjectStore();
+  const { activeAgent, agentStatus, setAgentStatus, activeProject, memoryItems, setMemoryItem } = useProjectStore();
   const { triggerDecisionModal } = useUIStore();
+
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [activeDangerAlert, setActiveDangerAlert] = useState<RiskAlert | null>(null);
+  const [activeCostWarning, setActiveCostWarning] = useState<CostWarning>({
+    hasWarning: false,
+    proposedTech: '',
+    estimatedMonthlyCost: '',
+    recommendedAlternative: '',
+    recommendedCost: '',
+    savingsMessage: '',
+  });
 
   useEffect(() => {
     interceptorRef.current = new InterceptorEngine(memoryItems, (decisionEvent) => {
@@ -86,16 +100,19 @@ export const TerminalView: React.FC = () => {
       }
     });
 
-    const handleResize = () => {
+    // ResizeObserver for automatic layout fitting
+    const resizeObserver = new ResizeObserver(() => {
       if (fitAddonRef.current && terminalInstanceRef.current && sessionId) {
-        fitAddonRef.current.fit();
-        ptyService.resizePty(sessionId, term.cols, term.rows);
+        try {
+          fitAddonRef.current.fit();
+          ptyService.resizePty(sessionId, term.cols, term.rows);
+        } catch (e) {}
       }
-    };
-    window.addEventListener('resize', handleResize);
+    });
+    resizeObserver.observe(terminalContainerRef.current);
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
       term.dispose();
     };
   }, [activeAgent]);
@@ -118,8 +135,25 @@ export const TerminalView: React.FC = () => {
   const handleUserPromptSubmit = (rawInput: string) => {
     if (!sessionId) return;
 
-    const parsed = CommandCenterService.parseInput(rawInput);
+    // 1. Risk Inspection Guard
+    const riskCheck = RiskGuardService.inspectCommand(rawInput);
+    if (riskCheck.isDangerous) {
+      ptyService.pausePty(sessionId);
+      setAgentStatus('paused');
+      setActiveDangerAlert(riskCheck);
+      return;
+    }
 
+    // 2. Cost-Awareness Advisory Inspection
+    const costCheck = CostEstimatorService.evaluateArchitectureCost(rawInput);
+    if (costCheck.hasWarning) {
+      setActiveCostWarning(costCheck);
+    } else {
+      setActiveCostWarning({ hasWarning: false, proposedTech: '', estimatedMonthlyCost: '', recommendedAlternative: '', recommendedCost: '', savingsMessage: '' });
+    }
+
+    // 3. Command Center Slash Commands
+    const parsed = CommandCenterService.parseInput(rawInput);
     if (parsed.isCommand && parsed.command) {
       const cmd = parsed.command;
       if (cmd.name === '/pause') {
@@ -133,7 +167,7 @@ export const TerminalView: React.FC = () => {
         return;
       }
       if (cmd.name === '/commit') {
-        ptyService.writePty(sessionId, '\r\n[GIT COMMIT ENGINE] Staged files and created commit.\r\n$ ');
+        ptyService.writePty(sessionId, '\r\n\x1b[32m[GIT COMMIT AGENT]\x1b[0m Staged files and created conventional commit.\r\n$ ');
         return;
       }
 
@@ -146,10 +180,18 @@ export const TerminalView: React.FC = () => {
     }
   };
 
+  const handleApplyCostAlternative = (alternative: string) => {
+    if (sessionId) {
+      setMemoryItem('deployment.infra', alternative);
+      ptyService.writePty(sessionId, `\r\n[DEVELOPER DIRECTIVE]: Enforce budget-friendly infrastructure: "${alternative}". Do not use high-cost clusters.\r\n$ `);
+      setActiveCostWarning({ hasWarning: false, proposedTech: '', estimatedMonthlyCost: '', recommendedAlternative: '', recommendedCost: '', savingsMessage: '' });
+    }
+  };
+
   return (
-    <div className="h-full flex flex-col bg-[#080d17] rounded-xl border border-slate-800 overflow-hidden shadow-2xl">
+    <div className="h-full flex flex-col bg-[#080d17] rounded-xl border border-slate-800 overflow-hidden shadow-2xl space-y-2">
       {/* Top Header */}
-      <div className="h-10 bg-[#0d1424] border-b border-slate-800 px-4 flex items-center justify-between">
+      <div className="h-10 bg-[#0d1424] border-b border-slate-800 px-4 flex items-center justify-between shrink-0">
         <div className="flex items-center space-x-2 text-xs font-mono text-slate-300">
           <TerminalIcon className="w-4 h-4 text-indigo-400" />
           <span>Interactive PTY Stream ({activeAgent})</span>
@@ -178,14 +220,44 @@ export const TerminalView: React.FC = () => {
         </div>
       </div>
 
+      {/* Cost Warning Advisory Bar if triggered */}
+      {activeCostWarning.hasWarning && (
+        <div className="px-3 shrink-0">
+          <CostWarningWidget warning={activeCostWarning} onApplyAlternative={handleApplyCostAlternative} />
+        </div>
+      )}
+
       {/* Terminal Canvas Container */}
       <div 
         ref={terminalContainerRef} 
-        className="flex-1 p-2 bg-[#060a12] overflow-hidden"
+        className="flex-1 min-h-[250px] p-2 bg-[#060a12] overflow-hidden"
       />
 
       {/* Command Bar with Slash Command Autocomplete */}
-      <CommandBar onSubmitPrompt={handleUserPromptSubmit} />
+      <div className="shrink-0">
+        <CommandBar onSubmitPrompt={handleUserPromptSubmit} />
+      </div>
+
+      {/* Danger Red Alert Modal */}
+      <DangerModal
+        alert={activeDangerAlert}
+        onApprove={() => {
+          if (sessionId && activeDangerAlert) {
+            ptyService.writePty(sessionId, `\r\n[AUTHORIZED]: ${activeDangerAlert.command}\r\n`);
+            ptyService.resumePty(sessionId);
+            setAgentStatus('running');
+          }
+          setActiveDangerAlert(null);
+        }}
+        onDeny={() => {
+          if (sessionId) {
+            ptyService.writePty(sessionId, `\r\n\x1b[31m[COMMAND DENIED BY DEVELOPER]\x1b[0m\r\n$ `);
+            ptyService.resumePty(sessionId);
+            setAgentStatus('running');
+          }
+          setActiveDangerAlert(null);
+        }}
+      />
     </div>
   );
 };
